@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("AeRisPmntXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");
+declare_id!("7zLsMUtip7bUXqztXn2MV71tZQP3D62bFz1XHvenKJJu");
 
 #[program]
 pub mod aeris {
@@ -52,7 +52,7 @@ pub mod aeris {
 
         // Execute the SPL token transfer
         let cpi_ctx = CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.token_program.key(),
             Transfer {
                 from: ctx.accounts.sender_token.to_account_info(),
                 to: ctx.accounts.recipient_token.to_account_info(),
