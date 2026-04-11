@@ -1,0 +1,22 @@
+node_modules
+.turbo
+dist
+.next
+.env
+.env.local
+.env*.local
+*.log
+
+# Anchor / Solana
+target/
+.anchor/
+test-ledger/
+
+# IDEs
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

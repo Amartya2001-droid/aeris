@@ -1,0 +1,24 @@
+{
+  "name": "aeris",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "anchor:build": "cd programs/aeris && anchor build",
+    "anchor:test": "cd programs/aeris && anchor test",
+    "anchor:deploy": "cd programs/aeris && anchor deploy"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

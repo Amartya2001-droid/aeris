@@ -1,0 +1,26 @@
+{
+  "name": "aeris-pay",
+  "version": "0.1.0",
+  "description": "Payment SDK for AI agents on Solana — x402 + USDC",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": ["solana", "payments", "ai-agents", "x402", "usdc"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@solana/web3.js": "^1.95.0"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
