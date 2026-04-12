@@ -8,6 +8,9 @@ dist
 *.log
 .DS_Store
 
+# Local wallet keypairs — never commit these
+.local/
+
 # Anchor / Solana
 target/
 .anchor/
