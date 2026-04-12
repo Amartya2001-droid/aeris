@@ -43,12 +43,17 @@ function generateEvent(): FeedEvent {
 }
 
 export function LiveFeed() {
-  const [events, setEvents] = useState<FeedEvent[]>(() =>
-    Array.from({ length: 8 }, () => ({
-      ...generateEvent(),
-      ago: Math.floor(Math.random() * 60),
-    }))
-  );
+  const [events, setEvents] = useState<FeedEvent[]>([]);
+
+  // Populate initial events only on the client to avoid SSR hydration mismatch
+  useEffect(() => {
+    setEvents(
+      Array.from({ length: 8 }, () => ({
+        ...generateEvent(),
+        ago: Math.floor(Math.random() * 60),
+      }))
+    );
+  }, []);
 
   // Add a new event every 2-4 seconds
   useEffect(() => {
