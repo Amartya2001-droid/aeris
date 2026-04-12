@@ -1,7 +1,7 @@
 {
-  "name": "aeris-pay",
+  "name": "@aeris/x402",
   "version": "0.1.0",
-  "description": "Payment SDK for AI agents on Solana — x402 + USDC",
+  "description": "x402 HTTP payment middleware for Aeris — gate any endpoint behind a USDC micropayment",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -12,8 +12,11 @@
     "lint": "tsc --noEmit",
     "test": "vitest run"
   },
-  "keywords": ["solana", "payments", "ai-agents", "x402", "usdc"],
+  "keywords": ["x402", "http-402", "solana", "payments", "middleware", "express"],
   "license": "MIT",
+  "dependencies": {
+    "aeris-pay": "*"
+  },
   "peerDependencies": {
     "@solana/web3.js": "^1.95.0",
     "@solana/spl-token": "^0.4.0"
@@ -21,6 +24,8 @@
   "devDependencies": {
     "@solana/web3.js": "^1.95.0",
     "@solana/spl-token": "^0.4.0",
+    "@types/express": "^4.17.0",
+    "express": "^4.18.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"

@@ -1,0 +1,276 @@
+{
+  "address": "7zLsMUtip7bUXqztXn2MV71tZQP3D62bFz1XHvenKJJu",
+  "metadata": {
+    "name": "aeris",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Aeris payment program — permissioned USDC transfer with spend policies"
+  },
+  "instructions": [
+    {
+      "name": "initialize_policy",
+      "docs": [
+        "Initialize a spend policy account for an agent.",
+        "Called once per agent wallet on first use."
+      ],
+      "discriminator": [
+        9,
+        186,
+        86,
+        225,
+        129,
+        162,
+        231,
+        56
+      ],
+      "accounts": [
+        {
+          "name": "policy",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  108,
+                  105,
+                  99,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "agent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "max_per_payment",
+          "type": "u64"
+        },
+        {
+          "name": "max_per_window",
+          "type": "u64"
+        },
+        {
+          "name": "window_seconds",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "pay",
+      "docs": [
+        "Execute a payment from one agent to a service/agent.",
+        "Enforces the caller's spend policy on-chain."
+      ],
+      "discriminator": [
+        119,
+        18,
+        216,
+        65,
+        192,
+        117,
+        122,
+        220
+      ],
+      "accounts": [
+        {
+          "name": "policy",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  108,
+                  105,
+                  99,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "agent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "agent",
+          "signer": true,
+          "relations": [
+            "policy"
+          ]
+        },
+        {
+          "name": "sender_token",
+          "writable": true
+        },
+        {
+          "name": "recipient_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "description",
+          "type": "string"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "SpendPolicy",
+      "discriminator": [
+        139,
+        90,
+        209,
+        31,
+        205,
+        15,
+        68,
+        243
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "PaymentEvent",
+      "discriminator": [
+        132,
+        136,
+        157,
+        119,
+        91,
+        254,
+        225,
+        20
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "ExceedsPerPaymentLimit",
+      "msg": "Payment amount exceeds the per-payment limit"
+    },
+    {
+      "code": 6001,
+      "name": "ExceedsWindowLimit",
+      "msg": "Payment would exceed the rolling window spend limit"
+    }
+  ],
+  "types": [
+    {
+      "name": "PaymentEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sender",
+            "type": "pubkey"
+          },
+          {
+            "name": "recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "description",
+            "type": "string"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SpendPolicy",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent",
+            "docs": [
+              "The agent wallet this policy belongs to"
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "max_per_payment",
+            "docs": [
+              "Max single payment (USDC micro-units, 6 decimals)"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_per_window",
+            "docs": [
+              "Max total spend per rolling window"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "window_seconds",
+            "docs": [
+              "Window length in seconds"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "window_start",
+            "docs": [
+              "Unix timestamp of when current window started"
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "window_total",
+            "docs": [
+              "Total spent in the current window"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump"
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}
