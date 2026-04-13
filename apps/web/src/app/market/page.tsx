@@ -1,3 +1,6 @@
+"use client";
+
+import { useState, useEffect } from "react";
 import { AgentCard } from "@/components/AgentCard";
 import { LiveFeed } from "@/components/LiveFeed";
 
@@ -6,7 +9,7 @@ const AGENT_SERVICES = [
     id: "web-scraper",
     name: "WebScraper Agent",
     description: "Scrapes any URL and returns clean markdown. Used by research agents.",
-    price: 500_000,      // $0.50
+    price: 500_000,
     category: "Data",
     callsToday: 1284,
     agent: "9xVk...3rFp",
@@ -15,7 +18,7 @@ const AGENT_SERVICES = [
     id: "gpt-summarizer",
     name: "Summarizer Agent",
     description: "Summarizes long documents into bullet points. GPT-4o under the hood.",
-    price: 1_000_000,    // $1.00
+    price: 1_000_000,
     category: "AI",
     callsToday: 876,
     agent: "4mNq...7tWs",
@@ -24,7 +27,7 @@ const AGENT_SERVICES = [
     id: "price-oracle",
     name: "Price Oracle Agent",
     description: "Real-time token prices from 5 sources. Aggregated and signed.",
-    price: 100_000,      // $0.10
+    price: 100_000,
     category: "Data",
     callsToday: 5423,
     agent: "BzRt...2kLm",
@@ -33,7 +36,7 @@ const AGENT_SERVICES = [
     id: "code-executor",
     name: "Code Executor Agent",
     description: "Runs sandboxed Python/JS. Returns stdout + execution time.",
-    price: 2_000_000,    // $2.00
+    price: 2_000_000,
     category: "Compute",
     callsToday: 342,
     agent: "7pQx...9nVb",
@@ -42,7 +45,7 @@ const AGENT_SERVICES = [
     id: "image-gen",
     name: "Image Generator Agent",
     description: "SDXL image generation. Returns IPFS hash of the generated image.",
-    price: 3_000_000,    // $3.00
+    price: 3_000_000,
     category: "AI",
     callsToday: 198,
     agent: "Dn3s...6hKj",
@@ -51,14 +54,61 @@ const AGENT_SERVICES = [
     id: "translate",
     name: "Translator Agent",
     description: "Translates text between 50+ languages. Preserves formatting.",
-    price: 250_000,      // $0.25
+    price: 250_000,
     category: "AI",
     callsToday: 2109,
     agent: "Lx8w...4mTr",
   },
 ];
 
+const PROGRAM_ID = "7zLsMUtip7bUXqztXn2MV71tZQP3D62bFz1XHvenKJJu";
+const RPC = "https://api.devnet.solana.com";
+const CATEGORIES = ["All", "Data", "AI", "Compute"];
+
+interface ChainStats {
+  txCount: number;
+  loaded: boolean;
+}
+
+async function fetchChainStats(): Promise<ChainStats> {
+  try {
+    const res = await fetch(RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getSignaturesForAddress",
+        params: [PROGRAM_ID, { limit: 1000, commitment: "confirmed" }],
+      }),
+    });
+    const json = await res.json();
+    const txs = json.result ?? [];
+    return { txCount: txs.filter((t: any) => !t.err).length, loaded: true };
+  } catch {
+    return { txCount: 0, loaded: false };
+  }
+}
+
 export default function MarketPage() {
+  const [activeCategory, setActiveCategory] = useState("All");
+  const [stats, setStats] = useState<ChainStats>({ txCount: 0, loaded: false });
+
+  useEffect(() => {
+    fetchChainStats().then(setStats);
+    const id = setInterval(() => fetchChainStats().then(setStats), 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const filtered =
+    activeCategory === "All"
+      ? AGENT_SERVICES
+      : AGENT_SERVICES.filter((s) => s.category === activeCategory);
+
+  const totalVolume = AGENT_SERVICES.reduce(
+    (sum, s) => sum + (s.price / 1_000_000) * s.callsToday, 0
+  );
+
   return (
     <div className="min-h-screen bg-[#0F0F1A]">
       {/* Header */}
@@ -87,10 +137,19 @@ export default function MarketPage() {
         {/* Stats bar */}
         <div className="grid grid-cols-4 gap-4 mb-8">
           {[
-            { label: "Active Agents", value: "6" },
-            { label: "Payments Today", value: "10,232" },
-            { label: "Volume (USDC)", value: "$4,819" },
-            { label: "Avg Latency", value: "380ms" },
+            {
+              label: "Active Agents",
+              value: AGENT_SERVICES.length.toString(),
+            },
+            {
+              label: "On-chain Txs",
+              value: stats.loaded ? stats.txCount.toLocaleString() : "…",
+            },
+            {
+              label: "Simulated Volume",
+              value: `$${totalVolume.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+            },
+            { label: "Network", value: "Devnet" },
           ].map(({ label, value }) => (
             <div
               key={label}
@@ -108,13 +167,17 @@ export default function MarketPage() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-white">
                 Available Services
+                <span className="ml-2 text-sm font-normal text-gray-500">
+                  ({filtered.length})
+                </span>
               </h2>
               <div className="flex gap-2">
-                {["All", "Data", "AI", "Compute"].map((cat) => (
+                {CATEGORIES.map((cat) => (
                   <button
                     key={cat}
+                    onClick={() => setActiveCategory(cat)}
                     className={`px-3 py-1 rounded-full text-sm transition-colors ${
-                      cat === "All"
+                      cat === activeCategory
                         ? "bg-[#9945FF] text-white"
                         : "text-gray-400 hover:text-white border border-gray-800 hover:border-gray-600"
                     }`}
@@ -125,14 +188,20 @@ export default function MarketPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              {AGENT_SERVICES.map((service) => (
-                <AgentCard key={service.id} service={service} />
-              ))}
-            </div>
+            {filtered.length === 0 ? (
+              <div className="text-center py-16 text-gray-600">
+                No services in this category yet.
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                {filtered.map((service) => (
+                  <AgentCard key={service.id} service={service} />
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Live payment feed */}
+          {/* Live feed */}
           <div className="w-80 shrink-0">
             <LiveFeed />
           </div>

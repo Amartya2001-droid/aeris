@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import type { X402MiddlewareOptions, PaymentProof, PaymentRequired } from "./types";
 import { verifyPaymentProof } from "./verify";
+import { globalReplayGuard, ReplayGuard } from "./replay";
 
 /**
  * x402 Express middleware.
@@ -21,13 +22,14 @@ import { verifyPaymentProof } from "./verify";
  *   );
  *
  * Flow:
- *   1. Client hits the endpoint without X-PAYMENT header
- *      → 402 returned with PaymentRequired JSON
- *   2. Client pays using aeris-pay SDK, gets a tx signature
- *   3. Client retries request with X-PAYMENT: <base64 PaymentProof>
- *      → Middleware verifies on-chain, calls next() if valid
+ *   1. Client hits endpoint without X-PAYMENT header → 402 returned
+ *   2. Client pays with aeris-pay SDK, gets tx signature
+ *   3. Client retries with X-PAYMENT: <base64 PaymentProof>
+ *   4. Middleware verifies on-chain + checks replay guard → calls next()
  */
-export function requirePayment(opts: X402MiddlewareOptions) {
+export function requirePayment(
+  opts: X402MiddlewareOptions & { replayGuard?: ReplayGuard }
+) {
   const {
     amount,
     recipient,
@@ -35,6 +37,7 @@ export function requirePayment(opts: X402MiddlewareOptions) {
     network = "devnet",
     ttlSeconds = 300,
     verifier,
+    replayGuard = globalReplayGuard,
   } = opts;
 
   return async function x402Handler(
@@ -44,7 +47,7 @@ export function requirePayment(opts: X402MiddlewareOptions) {
   ): Promise<void> {
     const paymentHeader = req.headers["x-payment"] as string | undefined;
 
-    // No payment header → issue a 402
+    // ── No payment → issue 402 ──────────────────────────────────────────────
     if (!paymentHeader) {
       const paymentRequired: PaymentRequired = {
         x402Version: "1",
@@ -62,18 +65,45 @@ export function requirePayment(opts: X402MiddlewareOptions) {
       return;
     }
 
-    // Parse the payment proof from the header
+    // ── Parse the payment proof ─────────────────────────────────────────────
     let proof: PaymentProof;
     try {
       proof = JSON.parse(
         Buffer.from(paymentHeader, "base64").toString("utf8")
       ) as PaymentProof;
     } catch {
-      res.status(400).json({ error: "Invalid X-PAYMENT header format" });
+      res.status(400).json({ error: "Invalid X-PAYMENT header: not valid base64 JSON" });
       return;
     }
 
-    // Verify the payment
+    // ── Validate proof fields ───────────────────────────────────────────────
+    if (!proof.signature || typeof proof.signature !== "string") {
+      res.status(400).json({ error: "Invalid X-PAYMENT: missing signature" });
+      return;
+    }
+    if (!proof.paidAt || typeof proof.paidAt !== "number") {
+      res.status(400).json({ error: "Invalid X-PAYMENT: missing paidAt" });
+      return;
+    }
+
+    // ── Expiry check (client-side timestamp) ────────────────────────────────
+    const ageSeconds = Math.floor(Date.now() / 1000) - proof.paidAt;
+    if (ageSeconds > ttlSeconds) {
+      res.status(402).json({
+        error: `Payment proof expired (${ageSeconds}s old, max ${ttlSeconds}s)`,
+      });
+      return;
+    }
+
+    // ── Replay attack check ─────────────────────────────────────────────────
+    if (!replayGuard.check(proof.signature)) {
+      res.status(402).json({
+        error: "Payment proof already used (replay attack prevented)",
+      });
+      return;
+    }
+
+    // ── On-chain verification ───────────────────────────────────────────────
     try {
       const valid = verifier
         ? await verifier(proof)
@@ -83,20 +113,22 @@ export function requirePayment(opts: X402MiddlewareOptions) {
         res.status(402).json({ error: "Payment verification failed" });
         return;
       }
-    } catch (err) {
+    } catch {
       res.status(402).json({ error: "Payment verification error" });
       return;
     }
 
-    // Payment verified — attach proof to request and continue
+    // ── Mark signature as used (prevent replay) ─────────────────────────────
+    replayGuard.mark(proof.signature);
+
+    // ── Payment verified — attach proof and continue ─────────────────────────
     (req as any).aerisPayment = proof;
     next();
   };
 }
 
 /**
- * Helper: build the X-PAYMENT header value from a tx signature.
- * Use this in the aeris-pay SDK client after a successful payment.
+ * Helper: build the X-PAYMENT header value from a PaymentReceipt.
  */
 export function buildPaymentHeader(proof: PaymentProof): string {
   return Buffer.from(JSON.stringify(proof)).toString("base64");

@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("7zLsMUtip7bUXqztXn2MV71tZQP3D62bFz1XHvenKJJu");
+declare_id!("2FnDBXhyBgbmunvcGpAbGLc8i15fHvzdzkvK9yPJHHq7");
 
 #[program]
 pub mod aeris {
@@ -31,6 +31,12 @@ pub mod aeris {
     pub fn pay(ctx: Context<Pay>, amount: u64, description: String) -> Result<()> {
         let policy = &mut ctx.accounts.policy;
         let clock = Clock::get()?;
+
+        // Guard: zero-amount payments are not allowed
+        require!(amount > 0, AerisError::ZeroAmount);
+
+        // Guard: description must not be empty
+        require!(!description.is_empty(), AerisError::EmptyDescription);
 
         // Reset window if expired
         if clock.unix_timestamp - policy.window_start > policy.window_seconds {
@@ -164,4 +170,8 @@ pub enum AerisError {
     ExceedsPerPaymentLimit,
     #[msg("Payment would exceed the rolling window spend limit")]
     ExceedsWindowLimit,
+    #[msg("Payment amount must be greater than zero")]
+    ZeroAmount,
+    #[msg("Payment description must not be empty")]
+    EmptyDescription,
 }

@@ -2,18 +2,27 @@ import {
   Connection,
   PublicKey,
   Transaction,
+  TransactionInstruction,
+  SystemProgram,
   sendAndConfirmTransaction,
-  Keypair,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
+  getAccount,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import type { PaymentRequest, PaymentReceipt, NetworkCluster } from "./types";
 import { PolicyEnforcer } from "./policy";
 import { SessionKey } from "./session";
+import {
+  SessionExpiredError,
+  InsufficientBalanceError,
+  TransactionTimeoutError,
+  ZeroAmountError,
+  parseOnChainError,
+} from "./errors";
 
-// USDC mint addresses
+// USDC mint addresses per cluster
 export const USDC_MINT: Record<NetworkCluster, PublicKey> = {
   devnet: new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"),
   "mainnet-beta": new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
@@ -34,6 +43,10 @@ export interface AerisClientConfig {
   cluster?: NetworkCluster;
   rpcUrl?: string;
   policyEnforcer?: PolicyEnforcer;
+  /** Max tx confirmation attempts (default: 3) */
+  maxRetries?: number;
+  /** Ms to wait between retries (default: 1500) */
+  retryDelayMs?: number;
 }
 
 /**
@@ -47,39 +60,61 @@ export class AerisClient {
   public readonly connection: Connection;
   public readonly cluster: NetworkCluster;
   private policyEnforcer?: PolicyEnforcer;
+  private maxRetries: number;
+  private retryDelayMs: number;
 
   constructor(config: AerisClientConfig = {}) {
     this.cluster = config.cluster ?? "devnet";
     const rpcUrl = config.rpcUrl ?? RPC_URLS[this.cluster];
     this.connection = new Connection(rpcUrl, "confirmed");
     this.policyEnforcer = config.policyEnforcer;
+    this.maxRetries = config.maxRetries ?? 3;
+    this.retryDelayMs = config.retryDelayMs ?? 1500;
   }
 
   /**
    * Pay for a service using a session key.
-   * Enforces the spend policy client-side before building the transaction.
-   * The on-chain program enforces the policy a second time as the source of truth.
+   *
+   * Checks:
+   *  1. Session key not expired
+   *  2. Amount > 0
+   *  3. Sufficient USDC balance
+   *  4. Client-side policy limits (fast fail)
+   *  5. Auto-initializes policy PDA if not yet created
+   *  6. Submits tx with retry + timeout handling
+   *  7. On-chain program enforces limits as source of truth
    */
   async pay(
     sessionKey: SessionKey,
     request: PaymentRequest
   ): Promise<PaymentReceipt> {
-    if (sessionKey.isExpired) {
-      throw new Error("Session key has expired");
-    }
+    if (sessionKey.isExpired) throw new SessionExpiredError();
+    if (request.amount <= 0) throw new ZeroAmountError();
 
-    // Client-side policy check (fast fail before hitting the network)
     if (this.policyEnforcer) {
       this.policyEnforcer.enforce(request);
     }
 
-    const tx = await this.buildPayTx(sessionKey, request);
+    // Check USDC balance before hitting the network
+    const senderAta = await getAssociatedTokenAddress(
+      USDC_MINT[this.cluster],
+      sessionKey.publicKey
+    );
+    const tokenAccount = await getAccount(this.connection, senderAta).catch(() => null);
+    if (!tokenAccount) {
+      throw new InsufficientBalanceError(request.amount, 0);
+    }
+    if (Number(tokenAccount.amount) < request.amount) {
+      throw new InsufficientBalanceError(request.amount, Number(tokenAccount.amount));
+    }
 
-    const signature = await sendAndConfirmTransaction(
-      this.connection,
-      tx,
-      [sessionKey.keypair],
-      { commitment: "confirmed" }
+    // Auto-initialize policy if needed
+    await this._ensurePolicyExists(sessionKey);
+
+    // Submit with retry
+    const signature = await this._sendWithRetry(
+      sessionKey,
+      await this._buildPayTx(sessionKey, request)
     );
 
     if (this.policyEnforcer) {
@@ -95,8 +130,8 @@ export class AerisClient {
   }
 
   /**
-   * Initialize a spend policy on-chain for an agent.
-   * Must be called once per agent wallet before pay() works.
+   * Explicitly initialize a spend policy on-chain.
+   * `pay()` calls this automatically, but you can call it during agent setup.
    */
   async initializePolicy(
     sessionKey: SessionKey,
@@ -105,22 +140,23 @@ export class AerisClient {
       maxPerWindow: number;
       windowSeconds?: number;
     }
-  ): Promise<string> {
+  ): Promise<string | "already-initialized"> {
     const [policyPda] = this.getPolicyPda(sessionKey.publicKey);
-
-    // Check if already initialized
     const existing = await this.connection.getAccountInfo(policyPda);
     if (existing) return "already-initialized";
 
-    const tx = await this.buildInitPolicyTx(sessionKey, opts);
-    return sendAndConfirmTransaction(this.connection, tx, [sessionKey.keypair], {
-      commitment: "confirmed",
-    });
+    const tx = this._buildInitPolicyTx(
+      sessionKey.publicKey,
+      policyPda,
+      BigInt(opts.maxPerPayment),
+      BigInt(opts.maxPerWindow),
+      BigInt(opts.windowSeconds ?? 3600)
+    );
+
+    return this._sendWithRetry(sessionKey, tx);
   }
 
-  /**
-   * Fetch the on-chain spend policy for an agent.
-   */
+  /** Fetch the on-chain spend policy for an agent */
   async getPolicy(agentPubkey: PublicKey): Promise<SpendPolicyAccount | null> {
     const [policyPda] = this.getPolicyPda(agentPubkey);
     const info = await this.connection.getAccountInfo(policyPda);
@@ -136,52 +172,118 @@ export class AerisClient {
     );
   }
 
-  /** Get (or derive) the USDC ATA for a wallet */
+  /** Get the USDC ATA for a wallet */
   async getUsdcAta(wallet: PublicKey): Promise<PublicKey> {
-    return getAssociatedTokenAddress(
-      USDC_MINT[this.cluster],
-      wallet
-    );
+    return getAssociatedTokenAddress(USDC_MINT[this.cluster], wallet);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Private transaction builders
-  // ─────────────────────────────────────────────────────────────────────────
+  /** Get USDC balance for a wallet in micro-units */
+  async getUsdcBalance(wallet: PublicKey): Promise<number> {
+    const ata = await this.getUsdcAta(wallet);
+    const account = await getAccount(this.connection, ata).catch(() => null);
+    return account ? Number(account.amount) : 0;
+  }
 
-  private async buildPayTx(
+  // ─── Private helpers ───────────────────────────────────────────────────────
+
+  private async _ensurePolicyExists(sessionKey: SessionKey): Promise<void> {
+    const [policyPda] = this.getPolicyPda(sessionKey.publicKey);
+    const existing = await this.connection.getAccountInfo(policyPda);
+    if (existing) return;
+
+    // Default policy: $10 per payment, $100 per hour
+    const tx = this._buildInitPolicyTx(
+      sessionKey.publicKey,
+      policyPda,
+      BigInt(10_000_000),
+      BigInt(100_000_000),
+      BigInt(3600)
+    );
+    await this._sendWithRetry(sessionKey, tx);
+  }
+
+  private async _sendWithRetry(
+    sessionKey: SessionKey,
+    tx: Transaction
+  ): Promise<string> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        const { blockhash, lastValidBlockHeight } =
+          await this.connection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = sessionKey.publicKey;
+
+        const signature = await sendAndConfirmTransaction(
+          this.connection,
+          tx,
+          [sessionKey.keypair],
+          { commitment: "confirmed" }
+        );
+
+        // Verify confirmation within valid block height
+        const status = await this.connection.confirmTransaction(
+          { signature, blockhash, lastValidBlockHeight },
+          "confirmed"
+        );
+
+        if (status.value.err) {
+          throw new Error(`Transaction failed on-chain: ${JSON.stringify(status.value.err)}`);
+        }
+
+        return signature;
+      } catch (err: unknown) {
+        lastError = err;
+
+        const msg = err instanceof Error ? err.message : String(err);
+
+        // Don't retry on-chain logic errors — they will always fail
+        if (
+          msg.includes("ExceedsPerPaymentLimit") ||
+          msg.includes("ExceedsWindowLimit") ||
+          msg.includes("ZeroAmount") ||
+          msg.includes("EmptyDescription") ||
+          msg.includes("already in use")
+        ) {
+          throw parseOnChainError(err);
+        }
+
+        if (attempt < this.maxRetries) {
+          await new Promise((r) => setTimeout(r, this.retryDelayMs * attempt));
+        }
+      }
+    }
+
+    const msg = lastError instanceof Error ? lastError.message : String(lastError);
+    if (msg.includes("timeout") || msg.includes("block height")) {
+      throw new TransactionTimeoutError("unknown");
+    }
+
+    throw parseOnChainError(lastError);
+  }
+
+  private async _buildPayTx(
     sessionKey: SessionKey,
     request: PaymentRequest
   ): Promise<Transaction> {
     const [policyPda] = this.getPolicyPda(sessionKey.publicKey);
 
     const senderAta = await getAssociatedTokenAddress(
-      USDC_MINT[this.cluster],
-      sessionKey.publicKey
+      USDC_MINT[this.cluster], sessionKey.publicKey
     );
     const recipientAta = await getAssociatedTokenAddress(
-      USDC_MINT[this.cluster],
-      request.recipient
+      USDC_MINT[this.cluster], request.recipient
     );
 
-    // Encode the `pay` instruction manually using the discriminator from the IDL
-    // discriminator: [119, 18, 216, 65, 192, 117, 122, 220]
-    const discriminator = Buffer.from([119, 18, 216, 65, 192, 117, 122, 220]);
-
-    // Encode u64 amount (little-endian 8 bytes)
-    const amountBuf = Buffer.alloc(8);
-    amountBuf.writeBigUInt64LE(BigInt(request.amount));
-
-    // Encode string description (4-byte length prefix + utf8 bytes)
-    const desc = request.description ?? "";
+    // pay discriminator: [119, 18, 216, 65, 192, 117, 122, 220]
+    const disc = Buffer.from([119, 18, 216, 65, 192, 117, 122, 220]);
+    const amtBuf = Buffer.alloc(8);
+    amtBuf.writeBigUInt64LE(BigInt(request.amount));
+    const desc = request.description ?? "aeris-payment";
     const descBytes = Buffer.from(desc, "utf8");
-    const descLenBuf = Buffer.alloc(4);
-    descLenBuf.writeUInt32LE(descBytes.length);
-
-    const data = Buffer.concat([discriminator, amountBuf, descLenBuf, descBytes]);
-
-    const { TransactionInstruction, Transaction: Tx } = await import(
-      "@solana/web3.js"
-    );
+    const descLen = Buffer.alloc(4);
+    descLen.writeUInt32LE(descBytes.length);
 
     const ix = new TransactionInstruction({
       programId: AERIS_PROGRAM_ID,
@@ -192,69 +294,40 @@ export class AerisClient {
         { pubkey: recipientAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
-      data,
+      data: Buffer.concat([disc, amtBuf, descLen, descBytes]),
     });
 
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    const tx = new Tx().add(ix);
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = sessionKey.publicKey;
-    return tx;
+    return new Transaction().add(ix);
   }
 
-  private async buildInitPolicyTx(
-    sessionKey: SessionKey,
-    opts: { maxPerPayment: number; maxPerWindow: number; windowSeconds?: number }
-  ): Promise<Transaction> {
-    const [policyPda] = this.getPolicyPda(sessionKey.publicKey);
-
-    // discriminator: [9, 186, 86, 225, 129, 162, 231, 56]
-    const discriminator = Buffer.from([9, 186, 86, 225, 129, 162, 231, 56]);
-
-    const maxPerPaymentBuf = Buffer.alloc(8);
-    maxPerPaymentBuf.writeBigUInt64LE(BigInt(opts.maxPerPayment));
-
-    const maxPerWindowBuf = Buffer.alloc(8);
-    maxPerWindowBuf.writeBigUInt64LE(BigInt(opts.maxPerWindow));
-
-    const windowSecsBuf = Buffer.alloc(8);
-    windowSecsBuf.writeBigInt64LE(BigInt(opts.windowSeconds ?? 3600));
-
-    const data = Buffer.concat([
-      discriminator,
-      maxPerPaymentBuf,
-      maxPerWindowBuf,
-      windowSecsBuf,
-    ]);
-
-    const { TransactionInstruction, Transaction: Tx, SystemProgram } =
-      await import("@solana/web3.js");
+  private _buildInitPolicyTx(
+    agent: PublicKey,
+    policyPda: PublicKey,
+    maxPerPayment: bigint,
+    maxPerWindow: bigint,
+    windowSeconds: bigint
+  ): Transaction {
+    // initialize_policy discriminator: [9, 186, 86, 225, 129, 162, 231, 56]
+    const disc = Buffer.from([9, 186, 86, 225, 129, 162, 231, 56]);
+    const a = Buffer.alloc(8); a.writeBigUInt64LE(maxPerPayment);
+    const b = Buffer.alloc(8); b.writeBigUInt64LE(maxPerWindow);
+    const c = Buffer.alloc(8); c.writeBigInt64LE(windowSeconds);
 
     const ix = new TransactionInstruction({
       programId: AERIS_PROGRAM_ID,
       keys: [
         { pubkey: policyPda, isSigner: false, isWritable: true },
-        { pubkey: sessionKey.publicKey, isSigner: true, isWritable: true },
-        {
-          pubkey: SystemProgram.programId,
-          isSigner: false,
-          isWritable: false,
-        },
+        { pubkey: agent, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
-      data,
+      data: Buffer.concat([disc, a, b, c]),
     });
 
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    const tx = new Tx().add(ix);
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = sessionKey.publicKey;
-    return tx;
+    return new Transaction().add(ix);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// On-chain account types
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── On-chain account types ───────────────────────────────────────────────────
 
 export interface SpendPolicyAccount {
   agent: PublicKey;
@@ -267,8 +340,7 @@ export interface SpendPolicyAccount {
 }
 
 function deserializeSpendPolicy(data: Buffer): SpendPolicyAccount {
-  // Skip 8-byte discriminator
-  let offset = 8;
+  let offset = 8; // skip discriminator
   const agent = new PublicKey(data.slice(offset, offset + 32)); offset += 32;
   const maxPerPayment = data.readBigUInt64LE(offset); offset += 8;
   const maxPerWindow = data.readBigUInt64LE(offset); offset += 8;

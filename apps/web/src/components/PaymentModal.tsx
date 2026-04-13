@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 type Step = "confirm" | "paying" | "success" | "error";
+type ErrorReason = "no-wallet" | "insufficient-balance" | "tx-failed" | "unknown";
 
 interface AgentService {
   id: string;
@@ -23,19 +24,41 @@ export function PaymentModal({
 }) {
   const [step, setStep] = useState<Step>("confirm");
   const [txSig, setTxSig] = useState<string>("");
+  const [errorReason, setErrorReason] = useState<ErrorReason>("unknown");
+  const [errorMessage, setErrorMessage] = useState<string>("");
 
   const usdc = (service.price / 1_000_000).toFixed(2);
 
   async function handlePay() {
     setStep("paying");
-    // TODO (Week 3): wire to real AerisClient + Privy session key
-    // Simulating the flow for now
-    await new Promise((r) => setTimeout(r, 1800));
-    const fakeSig =
-      Math.random().toString(36).slice(2, 12) +
-      Math.random().toString(36).slice(2, 12);
-    setTxSig(fakeSig);
-    setStep("success");
+    try {
+      // TODO (Week 3): replace simulation with real AerisClient + Privy session key
+      await new Promise((r) => setTimeout(r, 1800));
+
+      // Simulate occasional failures for realistic UX testing
+      if (Math.random() < 0.05) {
+        throw new Error("insufficient-balance");
+      }
+
+      const fakeSig =
+        Math.random().toString(36).slice(2, 12) +
+        Math.random().toString(36).slice(2, 12);
+      setTxSig(fakeSig);
+      setStep("success");
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (msg.includes("insufficient-balance")) {
+        setErrorReason("insufficient-balance");
+        setErrorMessage(`Insufficient USDC balance for $${usdc} payment.`);
+      } else if (msg.includes("no-wallet") || msg.includes("wallet")) {
+        setErrorReason("no-wallet");
+        setErrorMessage("No wallet connected. Connect your wallet to pay.");
+      } else {
+        setErrorReason("tx-failed");
+        setErrorMessage("Transaction failed. Please try again.");
+      }
+      setStep("error");
+    }
   }
 
   return (
@@ -107,6 +130,44 @@ export function PaymentModal({
             <div className="text-sm text-gray-500 text-center">
               Submitting USDC transfer to Solana via x402
             </div>
+          </div>
+        )}
+
+        {step === "error" && (
+          <div className="py-6 flex flex-col items-center gap-4 text-center">
+            <div className="w-14 h-14 rounded-full bg-red-500/20 flex items-center justify-center text-2xl">
+              ✕
+            </div>
+            <div>
+              <div className="text-white font-semibold text-lg">
+                Payment Failed
+              </div>
+              <div className="text-sm text-gray-400 mt-1">{errorMessage}</div>
+            </div>
+            {errorReason === "insufficient-balance" && (
+              <a
+                href="https://faucet.circle.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-[#9945FF] hover:underline"
+              >
+                Get devnet USDC →
+              </a>
+            )}
+            {errorReason === "no-wallet" && (
+              <button
+                className="px-4 py-2 rounded-lg border border-[#9945FF] text-[#9945FF] text-sm hover:bg-[#9945FF]/10 transition-colors"
+                onClick={onClose}
+              >
+                Connect Wallet
+              </button>
+            )}
+            <button
+              onClick={() => setStep("confirm")}
+              className="w-full py-3 rounded-xl border border-gray-700 hover:border-gray-500 text-gray-300 font-medium transition-colors"
+            >
+              Try Again
+            </button>
           </div>
         )}
 

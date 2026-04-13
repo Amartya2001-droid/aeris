@@ -5,18 +5,17 @@ anchor_version = "1.0.0"
 resolution = true
 skip-lint = false
 
-[programs.localnet]
-aeris = "7zLsMUtip7bUXqztXn2MV71tZQP3D62bFz1XHvenKJJu"
-
 [programs.devnet]
 aeris = "7zLsMUtip7bUXqztXn2MV71tZQP3D62bFz1XHvenKJJu"
 
-[registry]
-url = "https://api.apr.dev"
+[programs.localnet]
+aeris = "2FnDBXhyBgbmunvcGpAbGLc8i15fHvzdzkvK9yPJHHq7"
 
 [provider]
-cluster = "Localnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+[hooks]
