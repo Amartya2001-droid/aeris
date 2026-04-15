@@ -4,16 +4,14 @@ import {
   Transaction,
   TransactionInstruction,
   SystemProgram,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
   getAccount,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import type { PaymentRequest, PaymentReceipt, NetworkCluster } from "./types";
+import type { AerisSigner, PaymentRequest, PaymentReceipt, NetworkCluster } from "./types";
 import { PolicyEnforcer } from "./policy";
-import { SessionKey } from "./session";
 import {
   SessionExpiredError,
   InsufficientBalanceError,
@@ -73,10 +71,10 @@ export class AerisClient {
   }
 
   /**
-   * Pay for a service using a session key.
+   * Pay for a service using any AerisSigner (SessionKey or Privy wallet).
    *
    * Checks:
-   *  1. Session key not expired
+   *  1. Signer not expired
    *  2. Amount > 0
    *  3. Sufficient USDC balance
    *  4. Client-side policy limits (fast fail)
@@ -85,10 +83,10 @@ export class AerisClient {
    *  7. On-chain program enforces limits as source of truth
    */
   async pay(
-    sessionKey: SessionKey,
+    signer: AerisSigner,
     request: PaymentRequest
   ): Promise<PaymentReceipt> {
-    if (sessionKey.isExpired) throw new SessionExpiredError();
+    if (signer.isExpired) throw new SessionExpiredError();
     if (request.amount <= 0) throw new ZeroAmountError();
 
     if (this.policyEnforcer) {
@@ -98,7 +96,7 @@ export class AerisClient {
     // Check USDC balance before hitting the network
     const senderAta = await getAssociatedTokenAddress(
       USDC_MINT[this.cluster],
-      sessionKey.publicKey
+      signer.publicKey
     );
     const tokenAccount = await getAccount(this.connection, senderAta).catch(() => null);
     if (!tokenAccount) {
@@ -109,12 +107,12 @@ export class AerisClient {
     }
 
     // Auto-initialize policy if needed
-    await this._ensurePolicyExists(sessionKey);
+    await this._ensurePolicyExists(signer);
 
     // Submit with retry
     const signature = await this._sendWithRetry(
-      sessionKey,
-      await this._buildPayTx(sessionKey, request)
+      signer,
+      await this._buildPayTx(signer, request)
     );
 
     if (this.policyEnforcer) {
@@ -134,7 +132,7 @@ export class AerisClient {
    * `pay()` calls this automatically, but you can call it during agent setup.
    */
   async initializePolicy(
-    sessionKey: SessionKey,
+    sessionKey: AerisSigner,
     opts: {
       maxPerPayment: number;
       maxPerWindow: number;
@@ -186,24 +184,29 @@ export class AerisClient {
 
   // ─── Private helpers ───────────────────────────────────────────────────────
 
-  private async _ensurePolicyExists(sessionKey: SessionKey): Promise<void> {
-    const [policyPda] = this.getPolicyPda(sessionKey.publicKey);
+  private async _ensurePolicyExists(signer: AerisSigner): Promise<void> {
+    const [policyPda] = this.getPolicyPda(signer.publicKey);
     const existing = await this.connection.getAccountInfo(policyPda);
     if (existing) return;
 
     // Default policy: $10 per payment, $100 per hour
     const tx = this._buildInitPolicyTx(
-      sessionKey.publicKey,
+      signer.publicKey,
       policyPda,
       BigInt(10_000_000),
       BigInt(100_000_000),
       BigInt(3600)
     );
-    await this._sendWithRetry(sessionKey, tx);
+    await this._sendWithRetry(signer, tx);
   }
 
+  /**
+   * Sign and send a transaction using any AerisSigner.
+   * Uses raw transaction flow: sign → sendRawTransaction → confirmTransaction.
+   * This works for both Keypair signers and Privy embedded wallet signers.
+   */
   private async _sendWithRetry(
-    sessionKey: SessionKey,
+    signer: AerisSigner,
     tx: Transaction
   ): Promise<string> {
     let lastError: unknown;
@@ -211,18 +214,20 @@ export class AerisClient {
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
         const { blockhash, lastValidBlockHeight } =
-          await this.connection.getLatestBlockhash();
+          await this.connection.getLatestBlockhash("confirmed");
+
         tx.recentBlockhash = blockhash;
-        tx.feePayer = sessionKey.publicKey;
+        tx.feePayer = signer.publicKey;
 
-        const signature = await sendAndConfirmTransaction(
-          this.connection,
-          tx,
-          [sessionKey.keypair],
-          { commitment: "confirmed" }
-        );
+        // Generic signing — works for Keypair-backed or Privy-backed signers
+        const signed = await signer.signTransaction(tx);
 
-        // Verify confirmation within valid block height
+        const rawTx = signed.serialize();
+        const signature = await this.connection.sendRawTransaction(rawTx, {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+        });
+
         const status = await this.connection.confirmTransaction(
           { signature, blockhash, lastValidBlockHeight },
           "confirmed"
@@ -264,13 +269,13 @@ export class AerisClient {
   }
 
   private async _buildPayTx(
-    sessionKey: SessionKey,
+    signer: AerisSigner,
     request: PaymentRequest
   ): Promise<Transaction> {
-    const [policyPda] = this.getPolicyPda(sessionKey.publicKey);
+    const [policyPda] = this.getPolicyPda(signer.publicKey);
 
     const senderAta = await getAssociatedTokenAddress(
-      USDC_MINT[this.cluster], sessionKey.publicKey
+      USDC_MINT[this.cluster], signer.publicKey
     );
     const recipientAta = await getAssociatedTokenAddress(
       USDC_MINT[this.cluster], request.recipient
@@ -289,7 +294,7 @@ export class AerisClient {
       programId: AERIS_PROGRAM_ID,
       keys: [
         { pubkey: policyPda, isSigner: false, isWritable: true },
-        { pubkey: sessionKey.publicKey, isSigner: true, isWritable: false },
+        { pubkey: signer.publicKey, isSigner: true, isWritable: false },
         { pubkey: senderAta, isSigner: false, isWritable: true },
         { pubkey: recipientAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
@@ -298,6 +303,24 @@ export class AerisClient {
     });
 
     return new Transaction().add(ix);
+  }
+
+  /**
+   * Build the x402 PaymentProof for an existing on-chain signature.
+   * Use this to create the X-PAYMENT header after a successful pay() call.
+   */
+  buildPaymentProof(receipt: PaymentReceipt): {
+    signature: string;
+    paidAt: number;
+    amount: number;
+    recipient: string;
+  } {
+    return {
+      signature: receipt.signature,
+      paidAt: receipt.timestamp,
+      amount: receipt.amount,
+      recipient: receipt.recipient.toBase58(),
+    };
   }
 
   private _buildInitPolicyTx(

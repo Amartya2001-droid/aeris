@@ -1,4 +1,21 @@
-import { PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+
+/**
+ * AerisSigner — generic signing interface.
+ *
+ * Implemented by:
+ *  - `SessionKey` (Keypair-backed, for scripts / agents)
+ *  - Privy wallet adapter (embedded wallet, for browser users)
+ *
+ * Anything with a publicKey and signTransaction() works.
+ */
+export interface AerisSigner {
+  readonly publicKey: PublicKey;
+  /** If set and true, AerisClient will reject the payment before sending */
+  readonly isExpired?: boolean;
+  /** Sign a transaction. Must NOT send it. */
+  signTransaction(tx: Transaction): Promise<Transaction>;
+}
 
 /** A 402 payment request issued by a service */
 export interface PaymentRequest {

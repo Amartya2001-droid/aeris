@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { AgentCard } from "@/components/AgentCard";
 import { LiveFeed } from "@/components/LiveFeed";
+import { WalletButton } from "@/components/WalletButton";
 
 const AGENT_SERVICES = [
   {
@@ -126,9 +127,7 @@ export default function MarketPage() {
               <span className="w-2 h-2 rounded-full bg-[#14F195] animate-pulse" />
               Devnet live
             </div>
-            <button className="px-4 py-2 rounded-lg bg-[#9945FF] hover:bg-[#9945FF]/90 text-white text-sm font-medium transition-colors">
-              Connect Wallet
-            </button>
+            <WalletButton />
           </div>
         </div>
       </header>

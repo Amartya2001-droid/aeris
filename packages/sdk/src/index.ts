@@ -15,3 +15,4 @@ export {
   parseOnChainError,
 } from "./errors";
 export * from "./types";
+export type { AerisSigner } from "./types";
